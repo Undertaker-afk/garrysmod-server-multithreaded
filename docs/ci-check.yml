@@ -1,0 +1,35 @@
+# Manual template only; not installed as an Actions workflow.
+# A repository owner with workflow permission may copy this to
+# .github/workflows/check.yml after reviewing it.
+name: Check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - run: cargo test -p scprust-core --no-default-features
+      - run: cargo build --workspace --bins
+      - run: python3 tests/http_smoke.py target/debug/scprust-workers
+      - run: python3 -m unittest discover -s tests -p test_query_probe.py
+      - run: python3 -m pip install python-a2s==1.4.2
+      - run: python3 tests/query_smoke.py target/debug/scprust-server
+        env:
+          SCPRUST_TEST_A2S: "1"
+      - run: python3 tests/map_smoke.py target/debug/scprust-map
+      - run: tools/test-standalone.sh
+  lua:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y lua5.1
+      - run: lua5.1 tests/bridge_test.lua
+      - run: lua5.1 tests/core_bridge_test.lua

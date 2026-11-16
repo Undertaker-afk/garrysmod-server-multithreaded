@@ -1,0 +1,10 @@
+[package]
+name = "scprust-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+default-run = "scprust-server"
+
+# The standalone transport can be built/tested without the offload service,
+# a registry connection, Lua, or any third-party runtime.
+[dependencies]
