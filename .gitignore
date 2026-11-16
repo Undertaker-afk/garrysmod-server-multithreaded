@@ -1,0 +1,5 @@
+/target/
+__pycache__/
+scprust_token.txt
+scprust-workers.env
+*.local.json

@@ -1,0 +1,22 @@
+[Unit]
+Description=SCP Rust snapshot workers
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+EnvironmentFile=/etc/scprust-workers.env
+ExecStart=/usr/local/bin/scprust-workers
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGINT
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
