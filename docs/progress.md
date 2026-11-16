@@ -1,24 +1,25 @@
 # Replacement-server acceptance ledger
 
-Status as of 2026-11-16. **No honest whole-server completion percentage is
-available.** There is no pinned GMod build, complete compatibility inventory,
-weighted work estimate, or end-to-end acceptance suite. Passing a fraction of
-rows below would not establish "30% implemented"; the remaining systems differ
-greatly in size/risk. This repository is not represented as 30% of a playable
-GMod server and does not yet support a single connecting GMod player.
+Status as of 2026-11-16. **No honest whole-server completion percentage (30%,
+50%, or similar) is available.** There is no pinned GMod build, complete
+compatibility inventory, weighted work estimate, or end-to-end acceptance suite.
+Passing a fraction of rows below would not establish a percentage of completion;
+the remaining systems differ greatly in size/risk. This repository is not
+represented as 50% (or 30%) of a playable GMod server and does not yet support a
+single connecting GMod player.
 
 | Boundary | Implemented evidence | Missing acceptance evidence |
 | --- | --- | --- |
 | Connectionless discovery | Bounded standalone UDP; A2S INFO/PLAYER/RULES with independent Python client | Valve browser and target GMod build comparison |
 | Bit primitives | Checked fields, signed values, LEB128, byte strings; synthetic vectors | Build-specific packet framing, sequence/reliability/compression |
-| Map data | Offline v20 directory/entities/planes/nodes/leaves/models/brush subset | Real-map corpus, other versions/compression, game-world activation |
-| Static collision | Brush-only point/AABB clipping; BSP broadphase; ordered parallel batches | Source differential tests, bevel completeness, displacements, props, dynamic entities |
+| Map data | Offline v20 directory/entities/planes/nodes/leaves/models/brush subset; `*N` brush-entity transforms; `info_player_*` spawn extraction | Real-map corpus, other versions/compression, entity I/O, game-world activation |
+| Static collision | World + static `*N` brush-entity point/AABB clipping; world BSP broadphase; ordered parallel batches | Source differential tests, bevel completeness, displacements, props, moving brush entities |
 | Custom gameplay core | Immutable CAS snapshots, AI policy, weighted routing, custom relevance | Actual Helix/schema semantics and integration/performance evidence |
 | Authentication | No success responses fabricated | Normal Steam registration/ticket validation and lifecycle |
 | Client sign-on | None | Compatible authenticated client, downloads, string tables, baselines |
-| Replication/player spawn | None | Unmodified client loads supported map, spawns, receives valid snapshots |
+| Replication/player spawn | Offline spawn-point validation only | Unmodified client loads supported map, spawns, receives valid snapshots |
 | Lua compatibility | Server-side bridge examples only | LuaJIT behavior, GMod bindings, hooks, userdata and native-module ABI |
-| Physics/movement | No Source simulation replacement | Hull movement, stepping, gravity, constraints, vehicles, collision parity |
+| Physics/movement | Bounded deterministic AABB controller (gravity, friction, slide, step, jump) on static BSP solids | Source movement/trace parity, ducking, water, ladders, props, constraints, vehicles, prediction |
 | Helix/SCP:RP | Optional read-only admin demos | Schema/addon inventory, character/inventory/database behavior regression suite |
 | Capacity/reliability | Bounded prototypes and synthetic compute benchmark | 150-player workload, tick-time distributions, soak/reconnect/loss tests |
 
@@ -34,9 +35,10 @@ it lacks `workflows` permission; the template is committed outside the Actions
 workflow directory and cannot run automatically. An authorized owner may review
 and install it. No remote CI check has run or passed for this milestone.
 
-Local validation: 43 native Rust tests, six Python probe tests, real UDP smoke
-including `python-a2s==1.4.2`, offline map CLI smoke, and both Lua 5.1 mock suites
-passed. Direct native Clippy/format checks passed for the new server components.
+Local validation: 57 native Rust tests (15 core + 39 server library + 2 query
+CLI + 1 map CLI), six Python probe tests, real UDP smoke including
+`python-a2s==1.4.2`, offline map/model/spawn CLI smoke, and both Lua 5.1 mock
+suites passed. Direct native Clippy/format checks passed for the server components.
 The full dependency-bearing Cargo/HTTP build remains unverified; this is not
 hidden behind the local standalone test result.
 

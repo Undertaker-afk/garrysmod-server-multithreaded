@@ -46,16 +46,20 @@ registry access (requires `rustc` and Python 3):
 tools/test-standalone.sh
 ```
 
-## Engine-facing milestone: BSP data, brush traces, checked bitstreams
+## Engine-facing milestone: BSP data, brush entities, spawns, movement, bitstreams
 
 Added offline BSP v20 entity/geometry parsing, bounded iterative BSP traversal,
-world-brush point and AABB clipping, contents masks, and ordered parallel trace
-batches. Unsupported layouts/compression and malformed references fail closed.
-Displacements, props, moving entities, Source movement/trace parity, and playable
-map activation are **not implemented**. The UDP process remains query-only.
+world + static `*N` brush-entity point and AABB clipping, `info_player_*`
+spawn extraction/validation, a bounded deterministic AABB movement controller,
+contents masks, and ordered parallel trace batches. Unsupported
+layouts/compression and malformed references fail closed. Displacements, props,
+moving entities, Source movement/trace parity, and playable map activation are
+**not implemented**. The UDP process remains query-only.
 
 ```sh
 cargo run -p scprust-server --bin scprust-map -- inspect /path/to/map.bsp
+cargo run -p scprust-server --bin scprust-map -- models /path/to/map.bsp
+cargo run -p scprust-server --bin scprust-map -- spawns /path/to/map.bsp
 cargo run -p scprust-server --bin scprust-map -- ray /path/to/map.bsp 1 -100 0 64 100 0 64
 ```
 
@@ -63,8 +67,8 @@ Checked LSB-first bit fields, signed fields, canonical LEB128, and byte strings
 are also available as library primitives, **not a client sign-on/netchannel**.
 See [supported formats, exclusions, tests, and provenance](docs/maps.md).
 
-**Whole-server completion is not claimed to be 30%.** The scope and acceptance
-criteria are not established, and no GMod client can join yet. The
+**Whole-server completion is not claimed to be 30% or 50%.** The scope and
+acceptance criteria are not established, and no GMod client can join yet. The
 [acceptance ledger](docs/progress.md) distinguishes tested components from
 missing end-to-end compatibility instead of inventing a percentage.
 

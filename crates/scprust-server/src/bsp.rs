@@ -126,7 +126,7 @@ impl Header {
         Ok(data)
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Plane {
     pub normal: Vec3,
     pub distance: f64,
@@ -146,6 +146,119 @@ pub(crate) struct Brush {
 pub(crate) struct Leaf {
     pub first: usize,
     pub count: usize,
+    pub cluster: i32,
+    pub contents: u32,
+}
+#[derive(Debug)]
+pub(crate) struct Model {
+    pub mins: Vec3,
+    pub maxs: Vec3,
+    pub headnode: i32,
+    pub brushes: Vec<usize>,
+}
+/// Brush entity backed by a BSP model, at its entity transform. Static: doors,
+/// movers and animated brush entities are not simulated here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SolidModel {
+    pub index: usize,
+    pub name: String,
+    pub origin: Vec3,
+    pub angles: Vec3,
+    pub brush_count: usize,
+}
+/// Model-space to world-space transform for brush entities.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Transform {
+    origin: Vec3,
+    rotation: [[f64; 3]; 3],
+    pub(crate) identity: bool,
+}
+fn matrix_vector(m: &[[f64; 3]; 3], v: Vec3) -> Vec3 {
+    [0, 1, 2].map(|row| m[row][0] * v[0] + m[row][1] * v[1] + m[row][2] * v[2])
+}
+impl Transform {
+    fn new(origin: Vec3, angles: Vec3) -> Result<Self> {
+        if !valid_vector(origin) || !valid_vector(angles) {
+            return Err(Error("invalid brush-entity transform"));
+        }
+        if origin == [0.0; 3] && angles == [0.0; 3] {
+            return Ok(Self {
+                origin,
+                rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                identity: true,
+            });
+        }
+        let (pitch, yaw, roll) = (
+            angles[0].to_radians(),
+            angles[1].to_radians(),
+            angles[2].to_radians(),
+        );
+        let (sp, cp) = (pitch.sin(), pitch.cos());
+        let (sy, cy) = (yaw.sin(), yaw.cos());
+        let (sr, cr) = (roll.sin(), roll.cos());
+        let forward = [cp * cy, cp * sy, -sp];
+        let right = [-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp];
+        let up = [cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp];
+        if [forward, right, up]
+            .iter()
+            .flatten()
+            .any(|v| !v.is_finite())
+        {
+            return Err(Error("nonfinite brush-entity rotation"));
+        }
+        // Source `right` points along local -y, so a proper rotation with the
+        // identity at zero angles uses columns (forward, -right, up). Yaw then
+        // matches Source; pitch/roll follow the same basis vectors.
+        let rotation = [
+            [forward[0], -right[0], up[0]],
+            [forward[1], -right[1], up[1]],
+            [forward[2], -right[2], up[2]],
+        ];
+        Ok(Self {
+            origin,
+            rotation,
+            identity: false,
+        })
+    }
+    /// Plane (n, d) in model space becomes (R n, d + dot(R n, origin)).
+    pub(crate) fn plane(&self, base: &Plane) -> Plane {
+        let normal = matrix_vector(&self.rotation, base.normal);
+        Plane {
+            normal,
+            distance: base.distance + dot(normal, self.origin),
+        }
+    }
+}
+fn parse_model_reference(value: &[u8]) -> Option<usize> {
+    let digits = value.strip_prefix(b"*")?;
+    if digits.is_empty() || digits.len() > 10 || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse().ok()
+}
+fn entity_vector(entity: &entities::Entity, key: &[u8]) -> Result<Option<Vec3>> {
+    let Some(value) = entity.get(key) else {
+        return Ok(None);
+    };
+    let parts: Vec<&[u8]> = value
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.len() != 3 {
+        return Err(Error("entity origin/angles is not a three-number vector"));
+    }
+    let mut out = [0.0; 3];
+    for (slot, part) in out.iter_mut().zip(parts) {
+        *slot = std::str::from_utf8(part)
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+            .ok_or(Error("invalid entity vector number"))?;
+    }
+    if !valid_vector(out) {
+        return Err(Error("out-of-bounds entity vector"));
+    }
+    Ok(Some(out))
 }
 #[derive(Debug)]
 pub struct Map {
@@ -159,7 +272,9 @@ pub struct Map {
     pub(crate) leaf_brushes: Vec<usize>,
     pub(crate) brushes: Vec<Brush>,
     pub(crate) sides: Vec<usize>,
-    pub(crate) headnode: i32,
+    pub(crate) models: Vec<Model>,
+    pub(crate) solid_models: Vec<SolidModel>,
+    pub(crate) solid_transforms: Vec<(usize, Transform)>,
     pub(crate) world_brushes: Vec<usize>,
 }
 fn leaf_index(child: i32) -> usize {
@@ -259,7 +374,12 @@ impl Map {
             if first + count > leaf_brushes.len() {
                 return Err(Error("leaf brush range invalid"));
             }
-            leaves.push(Leaf { first, count });
+            leaves.push(Leaf {
+                first,
+                count,
+                cluster: i16::from_le_bytes(l[4..6].try_into().expect("validated leaf")) as i32,
+                contents: i32_at(l, 0) as u32,
+            });
         }
         for n in &nodes {
             for child in n.children {
@@ -293,23 +413,32 @@ impl Map {
                 }
             }
         }
-        let models = header.data(bytes, 14, 0, 48, 1024)?;
-        if models.is_empty() {
+        let model_bytes = header.data(bytes, 14, 0, 48, 1024)?;
+        if model_bytes.is_empty() {
             return Err(Error("missing world model"));
         }
-        for model in models.chunks_exact(48) {
-            let mins = vector(model, 0)?;
-            let maxs = vector(model, 12)?;
-            vector(model, 24)?;
+        let mut models = Vec::with_capacity(model_bytes.len() / 48);
+        for record in model_bytes.chunks_exact(48) {
+            let mins = vector(record, 0)?;
+            let maxs = vector(record, 12)?;
+            vector(record, 24)?; // model origin (sound/light placement), unused
+            let headnode = i32_at(record, 36);
             if (0..3).any(|i| mins[i] > maxs[i])
-                || !child_valid(i32_at(model, 36), nodes.len(), leaves.len())
+                || !child_valid(headnode, nodes.len(), leaves.len())
             {
                 return Err(Error("invalid model bounds/headnode"));
             }
+            let model_brushes = collect_brushes(headnode, &nodes, &leaves, &leaf_brushes)?;
+            models.push(Model {
+                mins,
+                maxs,
+                headnode,
+                brushes: model_brushes,
+            });
         }
-        let headnode = i32_at(models, 36);
+        let (solid_models, solid_transforms) = resolve_solid_models(&entities, &models)?;
         let mut map = Self {
-            model_count: models.len() / 48,
+            model_count: models.len(),
             has_displacements: header.lumps[26].length != 0,
             header,
             entities,
@@ -319,12 +448,44 @@ impl Map {
             leaf_brushes,
             brushes,
             sides,
-            headnode,
+            models,
+            solid_models,
+            solid_transforms,
             world_brushes: Vec::new(),
         };
-        let ids = map.candidates(None);
-        map.world_brushes = ids;
+        map.world_brushes = map.candidate_brushes(map.models[0].headnode, None);
         Ok(map)
+    }
+    pub fn solid_models(&self) -> &[SolidModel] {
+        &self.solid_models
+    }
+    pub fn world_model_bounds(&self) -> (Vec3, Vec3) {
+        (self.models[0].mins, self.models[0].maxs)
+    }
+    /// Number of distinct non-negative leaf clusters declared by the leaf lump.
+    /// Visibility/PVS data itself is not decoded yet.
+    pub fn cluster_count(&self) -> usize {
+        self.leaves
+            .iter()
+            .filter(|leaf| leaf.cluster >= 0)
+            .map(|leaf| leaf.cluster as usize + 1)
+            .max()
+            .unwrap_or(0)
+    }
+    /// Union of leaf contents flags (for diagnostics, not a trace result).
+    pub fn leaf_contents(&self) -> u32 {
+        self.leaves.iter().fold(0, |all, leaf| all | leaf.contents)
+    }
+    pub(crate) fn transform_for(&self, model: usize) -> Transform {
+        self.solid_transforms
+            .iter()
+            .find(|(index, _)| *index == model)
+            .map(|(_, transform)| *transform)
+            .unwrap_or(Transform {
+                origin: [0.0; 3],
+                rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                identity: true,
+            })
     }
     pub fn plane_count(&self) -> usize {
         self.planes.len()
@@ -338,9 +499,14 @@ impl Map {
     pub fn world_brush_count(&self) -> usize {
         self.world_brushes.len()
     }
-    /// Conservative whole-segment BSP broadphase. Bounds are (start,end,mins,maxs).
-    pub(crate) fn candidates(&self, segment: Option<(Vec3, Vec3, Vec3, Vec3)>) -> Vec<usize> {
-        let mut stack = vec![self.headnode];
+    /// Conservative whole-segment BSP broadphase within one model's subtree.
+    /// Bounds are (start,end,mins,maxs) in that model's coordinate space.
+    pub(crate) fn candidate_brushes(
+        &self,
+        root: i32,
+        segment: Option<(Vec3, Vec3, Vec3, Vec3)>,
+    ) -> Vec<usize> {
+        let mut stack = vec![root];
         let mut nodes = vec![false; self.nodes.len()];
         let mut leaves = vec![false; self.leaves.len()];
         let mut brushes = BTreeSet::new();
@@ -383,6 +549,78 @@ impl Map {
         }
         brushes.into_iter().collect()
     }
+}
+fn collect_brushes(
+    root: i32,
+    nodes: &[Node],
+    leaves: &[Leaf],
+    leaf_brushes: &[usize],
+) -> Result<Vec<usize>> {
+    let mut stack = vec![root];
+    let mut seen_nodes = vec![false; nodes.len()];
+    let mut seen_leaves = vec![false; leaves.len()];
+    let mut found = BTreeSet::new();
+    while let Some(child) = stack.pop() {
+        if child < 0 {
+            let index = leaf_index(child);
+            if index >= leaves.len() {
+                return Err(Error("invalid model leaf reference"));
+            }
+            if std::mem::replace(&mut seen_leaves[index], true) {
+                continue;
+            }
+            let leaf = &leaves[index];
+            found.extend(
+                leaf_brushes[leaf.first..leaf.first + leaf.count]
+                    .iter()
+                    .copied(),
+            );
+        } else {
+            let index = child as usize;
+            if index >= nodes.len() {
+                return Err(Error("invalid model node reference"));
+            }
+            if std::mem::replace(&mut seen_nodes[index], true) {
+                continue;
+            }
+            stack.extend(nodes[index].children);
+        }
+    }
+    Ok(found.into_iter().collect())
+}
+type SolidModels = (Vec<SolidModel>, Vec<(usize, Transform)>);
+
+fn resolve_solid_models(entities: &[entities::Entity], models: &[Model]) -> Result<SolidModels> {
+    let mut info = Vec::new();
+    let mut transforms = Vec::new();
+    for entity in entities {
+        let Some(value) = entity.get(b"model") else {
+            continue;
+        };
+        let Some(index) = parse_model_reference(value) else {
+            continue; // static/dynamic .mdl props are outside BSP brush collision
+        };
+        if index == 0 || index >= models.len() {
+            return Err(Error("brush entity model reference out of range"));
+        }
+        if transforms.iter().any(|(existing, _)| *existing == index) {
+            return Err(Error("multiple entities share one brush model"));
+        }
+        let origin = entity_vector(entity, b"origin")?.unwrap_or([0.0; 3]);
+        let angles = entity_vector(entity, b"angles")?.unwrap_or([0.0; 3]);
+        let transform = Transform::new(origin, angles)?;
+        info.push(SolidModel {
+            index,
+            name: String::from_utf8_lossy(value).into_owned(),
+            origin,
+            angles,
+            brush_count: models[index].brushes.len(),
+        });
+        transforms.push((index, transform));
+    }
+    info.sort_by_key(|model| model.index);
+    transforms.sort_by_key(|(index, _)| *index);
+    Ok((info, transforms))
 }
 pub(crate) fn projections(normal: Vec3, mins: Vec3, maxs: Vec3) -> (f64, f64) {
     let mut lo = 0.0;

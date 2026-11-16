@@ -2,6 +2,8 @@
 //! Static world brushes only. Hull sweeps rely on compiled bevel planes and may
 //! be conservative when bevels are absent. Displacements/props are not queried.
 use crate::bsp::{dot, projections, valid_vector, Error, Map, Result, Vec3};
+/// `CONTENTS_SOLID` from the public BSP flag definitions.
+pub const CONTENTS_SOLID: u32 = 0x1;
 #[derive(Clone, Copy, Debug)]
 pub struct Sweep {
     pub start: Vec3,
@@ -54,11 +56,26 @@ struct Interval {
     brush: usize,
 }
 impl Map {
+    /// Trace against the world model only (model 0).
     pub fn trace(&self, sweep: Sweep) -> Result<Trace> {
+        self.trace_model(0, sweep)
+    }
+    /// Trace one static BSP model, applying its entity transform if it has one.
+    /// Broadphase filtering is disabled for transformed models, which is
+    /// conservative but may test more brushes.
+    pub fn trace_model(&self, model: usize, sweep: Sweep) -> Result<Trace> {
         sweep.validate()?;
+        if model >= self.models.len() {
+            return Err(Error("unknown collision model"));
+        }
+        let transform = self.transform_for(model);
+        let segment =
+            transform
+                .identity
+                .then_some((sweep.start, sweep.end, sweep.mins, sweep.maxs));
         let mut intervals = Vec::new();
         let mut tested = 0;
-        for id in self.candidates(Some((sweep.start, sweep.end, sweep.mins, sweep.maxs))) {
+        for id in self.candidate_brushes(self.models[model].headnode, segment) {
             let brush = &self.brushes[id];
             if brush.contents & sweep.contents_mask == 0 {
                 continue;
@@ -72,7 +89,12 @@ impl Map {
             };
             let mut intersects = true;
             for side in &self.sides[brush.first..brush.first + brush.count] {
-                let plane = &self.planes[*side];
+                let base = &self.planes[*side];
+                let plane = if transform.identity {
+                    *base
+                } else {
+                    transform.plane(base)
+                };
                 let (offset, _) = projections(plane.normal, sweep.mins, sweep.maxs);
                 let distance = plane.distance - offset;
                 let start = dot(plane.normal, sweep.start) - distance;
@@ -141,6 +163,25 @@ impl Map {
             }
         }
         Ok(trace)
+    }
+    /// Trace the world plus every static brush-entity model. Dynamic/moving
+    /// brush entities and .mdl props are still absent.
+    pub fn trace_solids(&self, sweep: Sweep) -> Result<Trace> {
+        let mut best = self.trace_model(0, sweep)?;
+        let mut tested = best.tested_brushes;
+        for (index, _) in &self.solid_transforms {
+            let candidate = self.trace_model(*index, sweep)?;
+            tested += candidate.tested_brushes;
+            if candidate.fraction < best.fraction
+                || (candidate.fraction == best.fraction
+                    && candidate.start_solid
+                    && !best.start_solid)
+            {
+                best = candidate;
+            }
+        }
+        best.tested_brushes = tested;
+        Ok(best)
     }
 }
 
